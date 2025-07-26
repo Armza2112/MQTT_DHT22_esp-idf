@@ -16,11 +16,15 @@
 #include <time.h>
 #include "esp_sntp.h"
 #include "cJSON.h"
-#define HISTORY_SIZE 3
+#include "esp_spiffs.h"
+
+#define HISTORY_SIZE 100
 #define DHT_GPIO GPIO_NUM_13
 
-#define WIFI_SSID ""
-#define WIFI_PASS ""
+// #define WIFI_SSID "Device_Floor2_2.4G"
+// #define WIFI_PASS "Cheewanont2112"
+#define WIFI_SSID "ONEWAAN_2.4G"
+#define WIFI_PASS "one4070s"
 
 static EventGroupHandle_t wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -30,10 +34,12 @@ static const char *TAG_DHT22 = "DHT";
 
 esp_mqtt_client_handle_t mqtt_client = NULL;
 
-float temp_history[HISTORY_SIZE] = {NAN, NAN, NAN};
-float hum_history[HISTORY_SIZE] = {NAN, NAN, NAN};
-time_t time_history[HISTORY_SIZE] = {0, 0, 0};
-int history_index = 0; // วนเขียนใน buffer
+float temp_history[HISTORY_SIZE] = {NAN};
+float hum_history[HISTORY_SIZE] = {NAN};
+time_t time_history[HISTORY_SIZE] = {0};
+int history_index = 0;
+
+// sync time
 void initialize_sntp(void)
 {
     ESP_LOGI("SNTP", "Initializing SNTP");
@@ -66,14 +72,7 @@ void wait_for_time_sync(void)
         ESP_LOGI("SNTP", "Time synchronized: %s", asctime(&timeinfo));
     }
 }
-void add_sensor_reading(float temp, float hum, time_t timestamp)
-{
-    temp_history[history_index] = temp;
-    hum_history[history_index] = hum;
-    time_history[history_index] = timestamp;
-
-    history_index = (history_index + 1) % HISTORY_SIZE; // วนเก็บใหม่
-}
+// sync time
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -131,7 +130,33 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 }
+void add_sensor_reading(float temp, float hum, time_t timestamp)
+{
+    temp_history[history_index] = temp;
+    hum_history[history_index] = hum;
+    time_history[history_index] = timestamp;
 
+    history_index = (history_index + 1) % HISTORY_SIZE;
+}
+
+void init_spiffs()
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = NULL,
+        .max_files = 5,
+        .format_if_mount_failed = true};
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE("SPIFFS", "Failed to mount or format filesystem");
+    }
+    else
+    {
+        ESP_LOGI("SPIFFS", "SPIFFS mounted successfully");
+    }
+}
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_mqtt_event_handle_t event = event_data;
@@ -160,7 +185,6 @@ void mqtt_publish_task(void *pvParameters)
     setenv("TZ", "ICT-7", 1);
     tzset();
     vTaskDelay(pdMS_TO_TICKS(2000));
-
     while (1)
     {
         int ret = readDHT();
@@ -198,6 +222,7 @@ void mqtt_publish_task(void *pvParameters)
 void mqtt_publish_history()
 {
     vTaskDelay(pdMS_TO_TICKS(2000));
+    
     while (1)
     {
 
@@ -223,6 +248,13 @@ void mqtt_publish_history()
             cJSON_AddNumberToObject(entry, "humidity", hum_history[idx]);
 
             cJSON_AddItemToArray(history, entry);
+
+            FILE *f = fopen("/spiffs/log.txt", "a");
+            if (f)
+            {
+                fprintf(f, "Time: %s Temp: %.2f Hum: %.2f\n", timestamp, temp_history[idx], hum_history[idx]);
+                fclose(f);
+            }
         }
         cJSON_AddItemToObject(root, "history", history);
 
@@ -237,6 +269,9 @@ void mqtt_publish_history()
         vTaskDelay(pdMS_TO_TICKS(60000));
     }
 }
+void disconnect_mqtt(){
+    
+}
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -244,6 +279,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(nvs_flash_init());
     wifi_init();
+    init_spiffs();
 
     ESP_LOGI(TAG_MQTT, "Waiting for Wi-Fi...");
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
